@@ -1,0 +1,208 @@
+main:
+  params: [event]
+  steps:
+    - init:
+        assign:
+          - entities_extracted: {}
+          - yelp_rating_var: ''
+          - time_parsing_var: ''
+          - calories_estimates_var: ''
+          - image_gen_var: ''
+          - alcohol_check_var: ''
+          - budget_policy_var: ''
+    - log_event:
+        call: sys.log
+        args:
+          text: ${event}
+          severity: INFO
+    - check_data_key:
+        switch:
+          - condition: ${not ("data" in event)}
+            next: log_missing_data
+          - condition: ${"data" in event}
+            next: run_docai
+    - run_docai:
+        steps:
+          - extract_bucket_object:
+              assign:
+                - bucket: ${event.data.bucket}
+                - object: ${event.data.name}
+                - contenttype: ${event.data.contentType}
+          - log_event_2:
+              call: sys.log
+              args:
+                text: ${bucket}
+                severity: INFO
+          - return_bucket_object:
+              assign:
+                - bucket_object:
+                    bucket: ${bucket}
+                    object: ${object}
+                    contenttype: ${contenttype}
+          - doc_ai:
+              call: http.post
+              args:
+                url: https://us-central1-iot-poc-354821.cloudfunctions.net/docai_extract-text-auth
+                auth:
+                  type: OIDC
+                  audience: https://us-central1-iot-poc-354821.cloudfunctions.net/docai_extract-text-auth
+                body: 
+                  input: ${bucket_object}
+              result: intermediary_uri
+          - process_extraction:
+              call: http.post
+              args:
+                url: https://us-central1-iot-poc-354821.cloudfunctions.net/process_extraction
+                auth:
+                  type: OIDC
+                  audience: https://us-central1-iot-poc-354821.cloudfunctions.net/process_extraction
+                body: 
+                  input: ${intermediary_uri}
+              result: entities_extracted_dict
+          - save_entities:
+              assign:
+                - entities_extracted: ${entities_extracted_dict}
+    - parallelStep:
+        parallel:
+          shared: [yelp_rating_var, time_parsing_var, calories_estimates_var, image_gen_var, alcohol_check_var, budget_policy_var]
+          branches:
+            - yelp:
+                steps:
+                  - yelp_rating:
+                      call: http.post
+                      args:
+                        url: https://us-central1-iot-poc-354821.cloudfunctions.net/yelp_rating
+                        auth:
+                          type: OIDC
+                          audience: https://us-central1-iot-poc-354821.cloudfunctions.net/yelp_rating
+                        body: 
+                          input: ${entities_extracted_dict}
+                      result: yelp_rating_output
+                  - save_yelp:
+                      assign:
+                        - yelp_rating_var: ${yelp_rating_output}
+            - time:
+                steps:
+                  - time_parsing:
+                      call: http.post
+                      args:
+                        url: https://us-central1-iot-poc-354821.cloudfunctions.net/time-parsing
+                        auth:
+                          type: OIDC
+                          audience: https://us-central1-iot-poc-354821.cloudfunctions.net/time-parsing
+                        body: 
+                          input: ${entities_extracted_dict}
+                      result: time_parsing_output
+                  - save_time:
+                      assign:
+                        - time_parsing_var: ${time_parsing_output}
+                  - budget_policy:
+                      steps:
+                        - return_budget_object:
+                            assign:
+                              - budget_object:
+                                  time_parsing_output: ${time_parsing_var}
+                                  alcohol_check_output: ${alcohol_check_var}
+                                  entities_extracted_output: ${entities_extracted}
+                        - budget_policy_check:
+                            call: http.post
+                            args:
+                              url: https://us-central1-iot-poc-354821.cloudfunctions.net/budget_policy
+                              auth:
+                                type: OIDC
+                                audience: https://us-central1-iot-poc-354821.cloudfunctions.net/budget_policy
+                              body: 
+                                input: ${budget_object}
+                            result: budget_policy_output
+                        - save_ploicy_check:
+                            assign:
+                              - budget_policy_var: ${budget_policy_output}
+            - calories:
+                steps:
+                  - calories_estimates:
+                      call: http.post
+                      args:
+                        url: https://us-central1-iot-poc-354821.cloudfunctions.net/calories-estimates
+                        auth:
+                          type: OIDC
+                          audience: https://us-central1-iot-poc-354821.cloudfunctions.net/calories-estimates
+                        body: 
+                          input: ${entities_extracted_dict}
+                      result: calories_estimates_output
+                  - save_calories:
+                      assign:
+                        - calories_estimates_var: ${calories_estimates_output}
+            - alcohol_checker:
+                steps:
+                  - alcohol_check:
+                      call: http.post
+                      args:
+                        url: https://us-central1-iot-poc-354821.cloudfunctions.net/alcohol-checker
+                        auth:
+                          type: OIDC
+                          audience: https://us-central1-iot-poc-354821.cloudfunctions.net/alcohol-checker
+                        body: 
+                          input: ${entities_extracted_dict}
+                      result: alcohol_check
+                  - save_check:
+                      assign:
+                        - alcohol_check_var: ${alcohol_check}
+            - image:
+                steps:
+                  - prompt_image:
+                      call: http.post
+                      args:
+                        url: https://us-central1-iot-poc-354821.cloudfunctions.net/prompt-image
+                        auth:
+                          type: OIDC
+                          audience: https://us-central1-iot-poc-354821.cloudfunctions.net/prompt-image
+                        body: 
+                          input: ${entities_extracted_dict}
+                      result: prompt_image_output
+                  - image_gen:
+                      call: http.post
+                      args:
+                        url: https://us-central1-iot-poc-354821.cloudfunctions.net/image-gen
+                        auth:
+                          type: OIDC
+                          audience: https://us-central1-iot-poc-354821.cloudfunctions.net/image-gen
+                        body:
+                          input: ${prompt_image_output}
+                      result: image_gen_output
+                  - save_image:
+                      assign:
+                        - image_gen_var: ${image_gen_output}
+    - return_genai_object:
+        assign:
+          - genai_object:
+              entities_extracted_output: ${entities_extracted}
+              yelp_rating_output: ${yelp_rating_var}
+              time_parsing_output: ${time_parsing_var}
+              calories_estimates_output: ${calories_estimates_var}
+              image_gen_output: ${image_gen_var}
+              alcohol_checker_output: ${alcohol_check_var}
+              budget_policy_output: ${budget_policy_var}
+    - write_to_bqtable:
+        call: http.post
+        args:
+          url: https://us-central1-iot-poc-354821.cloudfunctions.net/write_to_bqtable
+          auth:
+            type: OIDC
+            audience: https://us-central1-iot-poc-354821.cloudfunctions.net/write_to_bqtable
+          body: 
+            input: ${genai_object}
+    - delete_inter_files:
+        call: http.post
+        args:
+          url: https://us-central1-iot-poc-354821.cloudfunctions.net/delete_inter_files
+          auth:
+            type: OIDC
+            audience: https://us-central1-iot-poc-354821.cloudfunctions.net/delete_inter_files
+          body: 
+            input: ${bucket_object}
+    - log_missing_data:
+        call: sys.log
+        args:
+          text: 'Data key not found in event'
+          severity: WARNING
+        next: end
